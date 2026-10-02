@@ -1,0 +1,46 @@
+# Standalone crate for the VoIP audio demo. Lives outside the root package so its
+# audio stack (cpal -> alsa-sys, needs ALSA/pkg-config on Linux) never enters the
+# dependency closure of `cargo build --example demo`, which the Docker image runs.
+# A workspace member but not a default-member: plain `cargo build` skips it; build
+# it explicitly with `cargo run -p whatsapp-rust-voip-cli`.
+[package]
+name = "whatsapp-rust-voip-cli"
+version = "0.7.0"
+edition = "2024"
+rust-version.workspace = true
+license = "MIT"
+publish = false
+
+[features]
+default = ["voip-mlow", "voip-opus"]
+voip-mlow = ["whatsapp-rust/voip-mlow"]
+voip-opus = ["whatsapp-rust/voip-encoded", "whatsapp-rust/voip-libopus"]
+
+[dependencies]
+anyhow = { workspace = true }
+async-channel = { workspace = true }
+bytes = { workspace = true }
+cpal = "0.18"
+env_logger = { workspace = true }
+hex = { workspace = true }
+log = { workspace = true }
+portable-atomic = { workspace = true }
+rand = { workspace = true }
+ringbuf = "0.5"
+tokio = { workspace = true, features = ["full"] }
+wacore = { path = "../../wacore", features = ["voip"] }
+whatsapp-rust = { path = "../..", features = [
+    "sqlite-storage",
+    "tokio-transport",
+    "ureq-client",
+    "tokio-native",
+    # The way onto the media wire. It used to arrive with the codec profiles above, and no longer
+    # does: `voip-runtime` is the portable half and the UDP relay dialler is its own feature, so a
+    # native shell that does not install a provider of its own has to ask for it. Here rather than
+    # in each codec feature, because it is not a property of the codec -- and a CLI that skipped it
+    # would build fine and then fail every call at "no relay media transport".
+    "voip-relay-native",
+] }
+
+[lints]
+workspace = true

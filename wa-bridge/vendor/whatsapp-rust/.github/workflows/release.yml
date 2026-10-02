@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # Everything downstream is keyed on this version, and publishing to crates.io
+  # cannot be undone. Read and check it before that point, not after, so a bad
+  # version costs a failed job instead of published crates with no tag, no
+  # release and no image.
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: ""
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-16
+
+      - name: Extract and validate version
+        id: version
+        run: cargo xt ci workflow release-version
+  validate:
+    name: Validate
+    uses: ./.github/workflows/main.yml
+
+  validate-e2e:
+    name: Validate E2E
+    uses: ./.github/workflows/e2e.yml
+    secrets: inherit
+
+  publish:
+    name: Publish to crates.io
+    needs: [preflight, validate, validate-e2e]
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-16
+
+      - name: Install cargo-release
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-release@0.25.20
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "false"
+
+      - name: Publish workspace crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo release publish --workspace --execute --no-confirm
+
+  github-release:
+    name: Create GitHub Release
+    needs: [preflight, publish]
+    runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-16
+
+      - name: Create tag
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+        run: cargo xt ci workflow release-tag
+      - name: Create GitHub Release
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo xt ci workflow github-release
+  # The tag pushed above with GITHUB_TOKEN can't trigger docker.yml's tag event,
+  # so invoke it directly and pass the version for the :X.Y.Z image tag.
+  publish-docker:
+    name: Publish Docker image
+    needs: [preflight, github-release]
+    # docker.yml logs into GHCR and pushes the multi-arch image manifest.
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker.yml
+    with:
+      version: ${{ needs.preflight.outputs.version }}

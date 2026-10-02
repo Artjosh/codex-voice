@@ -1,0 +1,42 @@
+# Separate stack from cecchin-backend: own project name, network, volume and WhatsApp
+# session (a new linked device). Nothing here touches services/whatsapp-web.
+name: wa-voice
+
+services:
+  codex-voice:
+    build: .
+    restart: unless-stopped
+    environment:
+      VOICE_TOKEN: ${VOICE_TOKEN:?set VOICE_TOKEN in .env}
+      WA_BRIDGE_URL: http://wa-voice-bridge:3340
+      WA_VOICE: ${WA_VOICE:-cove}
+      WA_IDLE_MINUTES: ${WA_IDLE_MINUTES:-5}
+      WA_MAX_CALL_MINUTES: ${WA_MAX_CALL_MINUTES:-60}
+      DELEGATE_MODEL: ${DELEGATE_MODEL:-gpt-5.6-terra}
+    volumes:
+      # ChatGPT login of this app (created by "Entrar com ChatGPT"), reused from disk.
+      - ./.data:/app/.data
+    ports:
+      - "127.0.0.1:8787:8787"
+      - "127.0.0.1:1455:1455" # OAuth callback for "Entrar com ChatGPT"
+
+  wa-voice-bridge:
+    build: ./wa-bridge
+    restart: unless-stopped
+    environment:
+      VOICE_WS_URL: ws://codex-voice:8787/api/pcm
+      VOICE_TOKEN: ${VOICE_TOKEN:?set VOICE_TOKEN in .env}
+      ALLOWED_CALLERS: ${ALLOWED_CALLERS:-}
+      PROTECTED_CALLERS: ${PROTECTED_CALLERS:-}
+      WHATSAPP_STORE: /data/whatsapp.db
+      RUST_LOG: ${BRIDGE_RUST_LOG:-warn}
+      WA_LOG_STANZAS: ${WA_LOG_STANZAS:-0}
+    volumes:
+      - wa-voice-data:/data
+    ports:
+      - "127.0.0.1:3340:3340"
+    depends_on:
+      - codex-voice
+
+volumes:
+  wa-voice-data:

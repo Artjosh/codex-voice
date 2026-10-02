@@ -1,0 +1,7 @@
+node_modules/
+.data/
+.env
+*.db
+*.db-*
+wa-bridge/target/
+wa-bridge/vendor/whatsapp-rust/target/

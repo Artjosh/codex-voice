@@ -1,0 +1,88 @@
+permissions:
+  contents: read
+name: Supply Chain
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_call:
+  workflow_dispatch:
+  # RUSTSEC advisories land against a lockfile that has not changed, so the
+  # audit needs a clock of its own rather than only PR triggers.
+  schedule:
+    - cron: '0 6 * * 1'
+
+concurrency:
+  # Grouped and scoped exactly as main.yml's concurrency block, for the reasons
+  # given there.
+  group: supply-chain-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep in sync with PROTOC_VERSION in main.yml — env is per-workflow, so the
+  # value cannot be shared across files without a repo-level Actions variable.
+  PROTOC_VERSION: '3.25.3'
+
+jobs:
+  cargo-deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-16
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      # No build here: cargo-deny resolves the graph from Cargo.lock, so it
+      # needs neither protoc nor ALSA nor a warm target dir.
+      - name: Run cargo-deny
+        run: cargo deny --locked --all-features check
+      - name: Audit host tooling dependencies
+        run: cargo deny --locked --manifest-path tools/oracle-task/Cargo.toml --all-features check
+
+  semver-checks:
+    name: Semver Checks (informational)
+    runs-on: ubuntu-latest
+    # Advisory only. The workspace is pre-1.0 and intentionally breaks API
+    # between minors; this job exists to make the break visible in the summary,
+    # not to block the PR.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-16
+      - name: Install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc@${{ env.PROTOC_VERSION }}
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      - name: Cache Rust build (registry + target)
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "true"
+      - name: Check API against the last published release
+        id: semver
+        env:
+          # Plain output: the progress spinner's escape codes are most of the
+          # log's bytes and render as noise once captured to a file.
+          CARGO_TERM_COLOR: never
+        run: cargo xt ci workflow semver-check
+      - name: Publish report to the job summary
+        if: always()
+        run: cargo xt ci workflow semver-summary --outcome '${{ steps.semver.outcome }}'
+      - name: Upload the full semver-checks log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: semver-checks-log
+          path: semver.log

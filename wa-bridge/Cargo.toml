@@ -1,0 +1,25 @@
+[package]
+name = "wa-voice-bridge"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+
+[dependencies]
+axum = "0.8"
+env_logger = "0.11"
+futures-util = "0.3"
+log = "0.4"
+qrcode = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "net", "time"] }
+tokio-tungstenite = "0.26"
+# Same pinned revision as services/whatsapp-web, plus the VoIP media stack:
+# MLOW codec (pure Rust, no libopus) and the native UDP relay transport.
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust.git", rev = "24652ea9e5fce77b56c2bc7a900ea06209a87da8", features = ["voip-mlow", "voip-libopus", "voip-relay-native"] }
+
+# Local copy of the pinned whatsapp-rust with one fix: accept group_update snapshots relayed
+# by the call service (<call_id>@call). Without it an invited device never gets the group
+# relay and cannot join group calls. See vendor/whatsapp-rust/src/handlers/call.rs.
+[patch."https://github.com/oxidezap/whatsapp-rust.git"]
+whatsapp-rust = { path = "vendor/whatsapp-rust" }

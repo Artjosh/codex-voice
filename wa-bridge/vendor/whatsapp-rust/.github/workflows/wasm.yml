@@ -1,0 +1,126 @@
+permissions:
+  contents: read
+name: WASM Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_call:
+
+concurrency:
+  # Grouped and scoped exactly as main.yml's concurrency block, for the reasons
+  # given there.
+  group: wasm-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  # The target dir is restored fresh each run (Swatinem cache), so incremental
+  # state is always cold and only bloats artifacts; worse, sccache refuses to
+  # cache incremental compilations, so leaving it on excludes the workspace
+  # crates from caching entirely.
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  wasm:
+    name: Build whatsapp-rust (wasm32, release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-16
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-bindgen test runner
+        uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20
+        with:
+          tool: wasm-bindgen-cli@0.2.127
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+      # Cache the target dir too: sccache can't cache proc-macros, build scripts
+      # or bins (linker-output crate types), and those recompile every run.
+      # Swatinem restores them; sccache still fills in after a Cargo.lock change.
+      - name: Cache Rust build (registry + target)
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "true"
+      # The host test invokes rustc for WASM cfg checks; do not cross-compile the test itself.
+      - name: Run native fixture cfg probe
+        run: cargo test -p whatsapp-rust --test native_test_support_cfg -- --ignored
+      # Mirrors how whatsapp-rust-bridge consumes the crate: lib only (the
+      # binary pulls tokio/sqlite), no default features. Guards against code
+      # reachable from wasm regressing on tokio/std-only APIs.
+      # getrandom needs both the wasm_js feature (declared for wasm32 in
+      # Cargo.toml) and this backend cfg.
+      - name: Build whatsapp-rust lib for wasm32 (release)
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: >
+          cargo build -p whatsapp-rust --lib --release
+          --target wasm32-unknown-unknown
+          --no-default-features
+      # The SQLite store reaches wasm through `storages/sqlite-storage/src/pool.rs`,
+      # which swaps r2d2 and tokio's blocking pool for a single connection behind a
+      # lock. Both of those type-check on wasm and only fail when a thread is actually
+      # spawned, so this build cannot observe the regression it guards against — the
+      # grep step below is what does. This step guards the rest: a dependency or an API
+      # that does not exist on wasm at all.
+      - name: Build sqlite-storage for wasm32 (release)
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: >
+          cargo build -p whatsapp-rust-sqlite-storage --lib --release
+          --target wasm32-unknown-unknown
+          --no-default-features --features wacore/js
+      - name: Run durability probe ID regression on wasm32
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+          CARGO_TARGET_DIR: target
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: >
+          cargo test --locked --manifest-path tools/durability-wasm-harness/Cargo.toml
+          --target wasm32-unknown-unknown --test probe -- --nocapture
+      - name: Run sqlite retry timer test on wasm32
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+          CARGO_TARGET_DIR: target
+        run: |
+          wasm_test_json="$RUNNER_TEMP/sqlite-wasm-retry-test.json"
+          cargo test --manifest-path tools/sqlite-wasm-retry-harness/Cargo.toml \
+            --target wasm32-unknown-unknown --test timer --no-run --message-format=json \
+            > "$wasm_test_json"
+          wasm_test_path="$(jq -r 'select(.profile.test == true and (.executable // null) != null) | .executable' "$wasm_test_json" | tail -n 1)"
+          test -n "$wasm_test_path"
+          wasm-bindgen-test-runner "$wasm_test_path" --nocapture
+      # r2d2's pool and tokio's `spawn_blocking` both panic on a page, and both
+      # compile there, so nothing but this check keeps them from creeping back into
+      # the store once the shim exists.
+      - name: Guard sqlite-storage's platform shim
+        run: cargo xt ci workflow guard-sqlite-shim
+      # The sans-IO VoIP core (wacore::voip: the CallEngine, the portable run_call driver,
+      # the RelayTransport seam, the MLow codec, SRTP/SFrame crypto) must stay wasm-buildable
+      # so a browser front end can drive 1:1 calls.
+      - name: Build wacore VoIP core for wasm32 (release)
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: >
+          cargo build -p wacore --lib --release
+          --target wasm32-unknown-unknown
+          --no-default-features --features "voip,js"
+      # And the half above it: signaling, the facade, `CallHandle` -- everything a consumer
+      # actually places a call through. It builds here because `voip-runtime` no longer carries the
+      # native relay dialer (that is `voip-relay-native`, and it is the one thing that still
+      # compile_error!s on this target), so what a page supplies is a `RelayTransportProvider` and
+      # not a reimplementation of the call flow. Without this step that split silently regresses the
+      # first time something in the facade reaches for a socket or a clock.
+      - name: Build whatsapp-rust VoIP runtime for wasm32 (release)
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: >
+          cargo build -p whatsapp-rust --lib --release
+          --target wasm32-unknown-unknown
+          --no-default-features --features voip-mlow

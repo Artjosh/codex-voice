@@ -1,0 +1,419 @@
+// Compile-checks the README examples as doctests, so the advertised quick
+// start can never silently rot.
+#![doc = include_str!("../README.md")]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+// Instrumenting large async fns (e.g. process_sync_task) wraps them in deep
+// `Instrumented` future types; the default depth limit overflows when the
+// `tracing` + `tracing-pii` paths combine. Raise it (compile-time only).
+#![recursion_limit = "512"]
+
+// Process-wide allocation counter shared by empirical unit-test guards. It sees
+// every thread, so measurements go through `min_allocs`, which retries until a
+// window lands quiet rather than trusting any single one.
+#[cfg(test)]
+#[allow(clippy::disallowed_types)]
+pub(crate) mod test_alloc {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
+
+    pub(crate) static ALLOCS: AtomicU64 = AtomicU64::new(0);
+    /// Bytes currently live, as a wrapping signed counter: allocation adds, free
+    /// subtracts, so a *delta* over a window is what that window still holds even
+    /// though the absolute value is meaningless (the process was already running
+    /// when counting started). Wrapping arithmetic keeps a window that frees more
+    /// than it allocates from being a panic in debug.
+    pub(crate) static LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
+
+    /// Size of the largest single block requested since it was last reset.
+    /// Separate from `ALLOCS` because the two answer different questions: a
+    /// count catches work that should not happen at all, this catches one
+    /// allocation that should not be *that big* — a boxed future sized for
+    /// every arm of a dispatch, say, which costs one allocation either way.
+    pub(crate) static MAX_BLOCK: AtomicUsize = AtomicUsize::new(0);
+
+    struct CountingAlloc;
+
+    unsafe impl GlobalAlloc for CountingAlloc {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+            LIVE_BYTES.fetch_add(layout.size() as i64, Ordering::Relaxed);
+            MAX_BLOCK.fetch_max(layout.size(), Ordering::Relaxed);
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            LIVE_BYTES.fetch_sub(layout.size() as i64, Ordering::Relaxed);
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+            LIVE_BYTES.fetch_add(new_size as i64 - layout.size() as i64, Ordering::Relaxed);
+            MAX_BLOCK.fetch_max(new_size, Ordering::Relaxed);
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    /// The quietest (live bytes, allocations) delta observed while running `op`,
+    /// retrying until one sample is within `expected` on both counts.
+    ///
+    /// Same contract and the same reason as [`min_allocs`]: both counters are
+    /// process-wide, so a sibling test thread allocating inside the window
+    /// inflates that window. Retrying until the window lands quiet makes ambient
+    /// traffic cost iterations instead of a false failure, and a real regression
+    /// never reaches `expected`, so the caller's assertion still fires with what
+    /// was actually observed.
+    pub(crate) fn min_live<T>(expected: (i64, u64), mut op: impl FnMut() -> T) -> (i64, u64) {
+        const BUDGET: u32 = 10_000;
+
+        let mut best = (i64::MAX, u64::MAX);
+        for _ in 0..BUDGET {
+            let (bytes_before, allocs_before) = (
+                LIVE_BYTES.load(Ordering::Relaxed),
+                ALLOCS.load(Ordering::Relaxed),
+            );
+            let held = std::hint::black_box(op());
+            let (bytes, allocs) = (
+                LIVE_BYTES
+                    .load(Ordering::Relaxed)
+                    .wrapping_sub(bytes_before),
+                ALLOCS.load(Ordering::Relaxed) - allocs_before,
+            );
+            // Dropped outside the window: what it frees is not this window's.
+            drop(held);
+            let sample = (bytes, allocs);
+            if sample.0 <= expected.0 && sample.1 <= expected.1 {
+                return sample;
+            }
+            // Always one real window, never minima stitched from two: ambient
+            // traffic inflates both counters together, so the sample with the
+            // fewest allocations is the quietest one this window saw.
+            if (sample.1, sample.0) < (best.1, best.0) {
+                best = sample;
+            }
+        }
+        best
+    }
+
+    #[global_allocator]
+    static GLOBAL: CountingAlloc = CountingAlloc;
+
+    /// Smallest allocation delta observed while running `op`, retrying until it
+    /// reaches `expected`.
+    ///
+    /// `ALLOCS` counts every allocation in the process, so a sibling test thread
+    /// allocating inside the window inflates that window's delta. A fixed
+    /// iteration count only hopes one of its windows lands quiet, which is a
+    /// flake under a loaded CI runner; retrying until the delta reaches
+    /// `expected` makes ambient traffic cost iterations instead of a false
+    /// failure. A real regression never reaches `expected`, so the caller's
+    /// assertion still fires — with the count actually observed.
+    pub(crate) fn min_allocs<T>(expected: u64, mut op: impl FnMut() -> T) -> u64 {
+        // Bounded so a genuine regression fails instead of spinning forever.
+        // The happy path exits on its first quiet window, so a budget this
+        // large is free unless something is actually wrong.
+        const BUDGET: u32 = 100_000;
+
+        let mut min = u64::MAX;
+        for _ in 0..BUDGET {
+            let before = ALLOCS.load(Ordering::Relaxed);
+            let value = std::hint::black_box(op());
+            let after = ALLOCS.load(Ordering::Relaxed);
+            drop(value);
+            min = min.min(after - before);
+            if min <= expected {
+                break;
+            }
+        }
+        min
+    }
+
+    /// Smallest "largest single block" observed while running `op`, retrying
+    /// until it reaches `expected`.
+    ///
+    /// Same discipline and the same reason as [`min_allocs`]: `MAX_BLOCK` is
+    /// process-wide, so a sibling test thread's large allocation lands in this
+    /// window's maximum. Taking the minimum across windows makes that cost
+    /// iterations rather than a false failure, while a block the measured code
+    /// really does allocate is in *every* window and survives the minimum.
+    pub(crate) fn min_max_block<T>(expected: usize, mut op: impl FnMut() -> T) -> usize {
+        const BUDGET: u32 = 10_000;
+
+        let mut min = usize::MAX;
+        for _ in 0..BUDGET {
+            MAX_BLOCK.store(0, Ordering::Relaxed);
+            let value = std::hint::black_box(op());
+            let observed = MAX_BLOCK.load(Ordering::Relaxed);
+            drop(value);
+            min = min.min(observed);
+            if min <= expected {
+                break;
+            }
+        }
+        min
+    }
+}
+
+/// The app-state collections, named as they appear on the wire. Part of the
+/// public surface because [`Client::resync_app_state`] takes them.
+///
+/// [`WAPatchName::Unknown`] is not one of them: it is what parsing an
+/// unrecognised collection name yields, so the server has nothing under that
+/// name. `resync_app_state` rejects a request naming it.
+pub use wacore::appstate::patch_decode::WAPatchName;
+pub use wacore::appstate::schemas;
+pub use wacore::client_profile::ClientProfile;
+/// Optional metrics emission (the `metrics` feature). No-op when the feature is off.
+pub use wacore::telemetry;
+pub use wacore::{
+    iq::privacy as privacy_settings, proto_helpers, sticker_pack, store::traits, webp,
+};
+pub use wacore_binary::CompactString;
+pub use wacore_binary::OwnedNodeRef;
+pub use wacore_binary::builder::NodeBuilder;
+pub use wacore_binary::{Jid, Server};
+
+// Whole-crate re-exports so a git consumer needs a single dependency:
+// every `wacore::…`/`wacore_binary::…`/`waproto::…` path is reachable as
+// `whatsapp_rust::wacore::…` (etc.) without declaring the sibling crates.
+pub use wacore;
+pub use wacore_binary;
+pub use waproto;
+
+// Third-party re-exports: these crates' types appear in the public API, so
+// consumers must name them; a direct dependency would have to version-match
+// this crate exactly.
+pub use anyhow;
+pub use async_channel;
+pub use async_trait::async_trait;
+pub use bytes;
+pub use futures;
+pub use serde;
+pub use serde_json;
+pub use wacore::chrono;
+pub use waproto::buffa;
+
+pub mod cache;
+pub use cache::Freshness;
+pub mod portable_cache;
+pub(crate) mod resend_rate_limiter;
+
+pub mod cache_config;
+pub use cache_config::{
+    CacheConfig, CacheEntryConfig, CacheStores, MsgSecretPolicy, MsgSecretRetention,
+    OriginalMessageResolver,
+};
+pub mod cache_store;
+pub(crate) mod pending_device_sync;
+pub(crate) mod sender_key_device_cache;
+pub use cache_store::CacheStore;
+pub mod http;
+pub mod types;
+
+pub mod client;
+pub(crate) mod flush_scope;
+/// Shared base error for transport/connection concerns; the per-domain error
+/// types embed it.
+pub use client::ClientError;
+pub use client::NodeFilter;
+pub use client::interceptor::{Interception, InterceptorHandle, StanzaInterceptor};
+pub use client::{
+    AllocSnapshot, CollectionStats, HttpResourceReport, MemoryReport, ResourceReport,
+    StatsSnapshot, StorageResourceReport, SubsystemCollection, SubsystemMemory,
+    TransportResourceReport,
+};
+pub use client::{CallError, Voip};
+pub use client::{
+    Client, ClientBuild, ClientBuilder, ClientBuilderError, Connection, DecryptedPayloadLease,
+    EncDecryptFailedLease, RawNodeLease, SentFrameLease,
+};
+#[cfg(feature = "client-lifecycle")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client-lifecycle")))]
+pub use client::{ClientLifecycle, ConnectionScope, ConnectionScopeState};
+pub use client::{
+    ConnectError, ConnectStage, ProtocolTerminalReason, Reachability, RunCompletionReason,
+    SignalMaintenanceError,
+};
+pub use types::durability_hook::InboundDurabilityHook;
+pub use types::history_sync_admission::{
+    HistorySyncAdmission, HistorySyncDecision, HistorySyncMetadata,
+};
+pub use types::retry_admission::RetryAdmission;
+pub mod download;
+pub mod error;
+pub use error::{ErrorChainExt, ServerRejection, Sources};
+pub mod handlers;
+pub use handlers::chatstate::ChatStateEvent;
+pub mod handshake;
+pub mod jid_utils;
+pub mod keepalive;
+pub mod mediaconn;
+pub mod message;
+pub(crate) mod msg_secret_buffer;
+pub mod pair;
+pub mod pair_code;
+#[cfg(feature = "passkey")]
+#[cfg_attr(docsrs, doc(cfg(feature = "passkey")))]
+pub mod passkey;
+#[cfg(feature = "plugins")]
+#[cfg_attr(docsrs, doc(cfg(feature = "plugins")))]
+pub mod plugins;
+#[cfg(feature = "plugins")]
+#[cfg_attr(docsrs, doc(cfg(feature = "plugins")))]
+pub use plugins::{
+    ClientPlugin, PluginCapabilities, PluginCapability, PluginConnectionScope,
+    PluginConnectionTasks, PluginContext, PluginCoreEventSubscription, PluginCoreEvents,
+    PluginEventEndpointConfig, PluginEventEndpointStats, PluginEventEnvelope, PluginEventOverflow,
+    PluginEventPayloadEncoding, PluginEventPublishError, PluginEventPublishReport,
+    PluginEventPublisherStats, PluginEventReceiveError, PluginEventRouteError, PluginEventRouter,
+    PluginEventRouterStats, PluginEventSelector, PluginEventSubscribeError,
+    PluginEventSubscription, PluginEventTopic, PluginEventTryReceiveError, PluginEvents,
+    PluginFuture, PluginHealth, PluginHostConfig, PluginHostStats, PluginInterceptorRegistration,
+    PluginIq, PluginIqError, PluginManifest, PluginMessaging, PluginMessagingError,
+    PluginPlanError, PluginResourceError, PluginStanzaInterception, PluginState, PluginStats,
+    PluginTasks, UntypedClientPlugin,
+};
+pub mod request;
+pub(crate) mod signal_flush;
+pub use request::{IqError, RejectionStanza};
+#[cfg(feature = "tokio-runtime")]
+pub mod runtime_impl;
+// The module is the feature's; the type inside it is the target's (`tokio::spawn` needs threads).
+// Re-exporting on the feature alone made `--features tokio-runtime` on wasm32 an unresolved import
+// rather than a runtime the target simply does not have.
+#[cfg(all(feature = "tokio-runtime", not(target_arch = "wasm32")))]
+pub use runtime_impl::TokioRuntime;
+pub use wacore::runtime::Runtime;
+pub mod send;
+pub use send::{EditOptions, PinDuration, RevokeType, SendError, SendOptions, SendResult};
+pub use wacore::send::StanzaType;
+pub mod media;
+pub mod session;
+pub mod socket;
+pub mod store;
+pub mod transport;
+pub mod upload;
+#[cfg(feature = "voip-runtime")]
+pub mod voip;
+pub use upload::UploadOptions;
+
+pub mod pdo;
+pub mod prekeys;
+pub mod receipt;
+pub mod retry;
+pub mod unified_session;
+
+pub mod appstate_sync;
+pub mod history_sync;
+pub mod usync;
+
+pub mod features;
+pub use features::{
+    AppStateError, AppStateResyncMode, AppStateResyncReport, AppStateSettings,
+    BUSINESS_PROFILE_MAX_WEBSITES, BatchGroupResult, Blocking, BlockingError, BlocklistEntry,
+    BotDefault, BotList, BotListEntry, BotListSection, BotListVersion, BotSectionDisplayType,
+    BotSectionType, BotTheme, BotThemeMode, Bots, Business, BusinessCategory, BusinessError,
+    BusinessHourMode, BusinessHours, BusinessHoursConfig, BusinessHoursUpdate, BusinessProfile,
+    BusinessProfileUpdate, BusinessProfileUpdateError, CappingMvStatus, CappingOteStatus,
+    CappingStatus, Catalog, CatalogOptions, ChatActions, ChatStateError, ChatStateType, Chatstate,
+    Collection, CollectionOptions, Collections, Comments, Community, CommunityError,
+    CommunitySubgroup, ContactError, Contacts, CoverPhotoUpload, CreateCommunityOptions,
+    CreateCommunityResult, CreateGroupResult, DayOfWeek, EncType, EncryptedEdit,
+    EventCreationParams, EventResponseType, Events, GroupAppealStatus, GroupCreateOptions,
+    GroupDescription, GroupEphemeralSettings, GroupError, GroupJoinError, GroupMessageReporter,
+    GroupMetadata, GroupParticipant, GroupParticipantDetails, GroupParticipantOptions,
+    GroupProfilePicture, GroupSubject, GroupType, Groups, GrowthLockInfo, ImporterAddress,
+    InviteInfoError, IsOnWhatsAppResult, JoinGroupResult, Labels, LinkSubgroupsResult,
+    MediaRetryResult, MediaReupload, MediaReuploadError, MediaReuploadRequest, MemberAddMode,
+    MemberLinkMode, MemberShareHistoryMode, MembershipApprovalMode, MembershipRequest,
+    MessageEditError, MessageRetransmission, Mex, MexError, MexErrorExtensions, MexFatalError,
+    MexGraphQLError, MexRequest, MexResponse, NackReason, NewChatMessageCapping, Newsletter,
+    NewsletterAdminInfo, NewsletterAdminProfile, NewsletterError, NewsletterFollower,
+    NewsletterMessage, NewsletterMessageType, NewsletterMetadata, NewsletterReactionCount,
+    NewsletterRole, NewsletterState, NewsletterVerification, Order, OrderPriceDetails,
+    OrderProduct, OwnUsername, ParticipantChangeResponse, ParticipantType, PictureType, PollError,
+    PollOptionResult, PollVoteCiphertext, Polls, Presence, PresenceError, PresencePolicy,
+    PresenceStatus, PreviousDescription, Price, Product, ProductAvailability, ProductImage,
+    ProductVideo, Profile, ProfileError, ProfilePicture, QuickReplies, ReachoutTimelock,
+    ReportedGroupMessage, ReportedGroupMessages, RetryReason, RetryRequestError,
+    RetryRequestOptions, RetryRequestOutcome, SalePrice, SecretEncKind, SecretEncrypted,
+    SetProfilePictureResponse, Signal, SignalError, SignalSessionInfo, SignalSessionMigration,
+    StanzaRejection, StanzaResponseError, Status, StatusPrivacySetting, StatusSendOptions,
+    SyncActionMessageRange, TcToken, TcTokenError, USERNAME_MAX_LENGTH, USERNAME_MIN_LENGTH,
+    UnlinkSubgroupsResult, UserInfo, UsernameLookup, UsernameLookupError, UsernameLookupUser,
+    UsyncSubprotocolError, VariantProperty, VerifiedName, group_type, message_key, message_range,
+};
+
+pub mod bot;
+pub mod lid_pn_cache;
+#[cfg(feature = "signal")]
+pub mod shutdown;
+#[cfg(feature = "signal")]
+pub use shutdown::shutdown_signal;
+pub mod spam_report;
+pub mod sync_task;
+pub mod version;
+
+/// One-import surface for the common bot path:
+/// `use whatsapp_rust::prelude::*;`.
+pub mod prelude {
+    pub use crate::bot::{Bot, BotBuilder, BotHandle, EventDelivery, MessageContext};
+    pub use crate::client::{
+        Client, ClientBuilder, ClientBuilderError, ClientError, Connection, DecryptedPayloadLease,
+        EncDecryptFailedLease, RawNodeLease, SentFrameLease,
+    };
+    #[cfg(feature = "client-lifecycle")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "client-lifecycle")))]
+    pub use crate::client::{ClientLifecycle, ConnectionScope, ConnectionScopeState};
+    pub use crate::client::{
+        ConnectError, ConnectStage, ProtocolTerminalReason, RunCompletionReason,
+    };
+    #[cfg(feature = "plugins")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "plugins")))]
+    pub use crate::plugins::{
+        ClientPlugin, PluginCapability, PluginConnectionScope, PluginContext,
+        PluginCoreEventSubscription, PluginEventEndpointConfig, PluginEventOverflow,
+        PluginEventPayloadEncoding, PluginEventRouter, PluginEventSelector,
+        PluginEventSubscription, PluginEventTopic, PluginEvents, PluginFuture, PluginHostConfig,
+        PluginInterceptorRegistration, PluginManifest, PluginStanzaInterception,
+        UntypedClientPlugin,
+    };
+    pub use crate::request::{IqError, RejectionStanza};
+    #[cfg(all(feature = "tokio-runtime", not(target_arch = "wasm32")))]
+    pub use crate::runtime_impl::TokioRuntime;
+    pub use crate::send::{EditOptions, SendError, SendOptions, SendResult};
+    #[cfg(feature = "signal")]
+    pub use crate::shutdown::shutdown_signal;
+    #[cfg(feature = "sqlite-storage")]
+    pub use crate::store::SqliteStore;
+    pub use crate::types::events::{
+        BatchOrigin, ChannelEventHandler, ChannelEventStats, Event, EventHandler, EventInterest,
+        EventKind, InboundMessage, MessageBatch, Subscription,
+    };
+    pub use crate::types::message::MessageInfo;
+    pub use crate::{Jid, Server};
+    pub use wacore::proto_helpers::{MessageBuilderExt, MessageExt};
+    /// Optional sub-message wrapper in `wa::Message` literals.
+    pub use waproto::buffa::MessageField;
+    /// The protobuf namespace (`wa::Message`, `wa::message::*`).
+    pub use waproto::whatsapp as wa;
+}
+
+pub use spam_report::{SpamFlow, SpamReportRequest, SpamReportResult};
+
+/// Offline fixture the client-level benchmarks build on. Not a public API:
+/// gated behind the non-default `bench-harness` feature and hidden from docs,
+/// so an ordinary build carries neither the module nor its sink transport.
+#[cfg(feature = "bench-harness")]
+#[doc(hidden)]
+pub mod bench_support;
+
+#[cfg(test)]
+pub mod test_utils;
+
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+#[doc(hidden)]
+pub mod test_support;
+
+#[cfg(test)]
+mod reexports_test;

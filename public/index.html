@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codex Voice</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { --bg: #f6f6f4; --fg: #1d1d1b; --muted: #6b6b66; --card: #fff; --line: #e2e2dd; --accent: #0f766e; --danger: #b42318; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #151514; --fg: #ececea; --muted: #9a9a94; --card: #1f1f1d; --line: #33332f; --accent: #2dd4bf; --danger: #f97066; } }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  #waPolicy { display: grid; gap: 10px; }
+  .listTitle { font-size: 13px; color: var(--muted); font-weight: 600; }
+  .opt { display: flex; gap: 6px; align-items: center; color: var(--fg); font-size: 14px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+  .lists { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+  .lists > div { display: grid; gap: 6px; align-content: start; transition: opacity .15s; }
+  .lists > div.inactive { opacity: .45; }
+  .lists ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+  .lists li { display: flex; justify-content: space-between; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 4px 4px 4px 10px; font-size: 14px; }
+  .lists li .tag { font-size: 12px; color: var(--muted); }
+  .lists li button { padding: 4px 10px; font-size: 13px; }
+  .addForm input { flex: 1; min-width: 0; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px; display: grid; gap: 16px; }
+  h1 { font-size: 20px; margin: 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: grid; gap: 12px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  label { font-size: 13px; color: var(--muted); display: grid; gap: 4px; }
+  select, textarea, input { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+  textarea { width: 100%; min-height: 60px; resize: vertical; }
+  button { font: inherit; border: 0; border-radius: 8px; padding: 10px 16px; cursor: pointer; background: var(--accent); color: #fff; }
+  button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--line); }
+  button.danger { background: var(--danger); }
+  button:disabled { opacity: .4; cursor: default; }
+  #status { color: var(--muted); font-size: 13px; }
+  #log { display: grid; gap: 8px; max-height: 50vh; overflow-y: auto; }
+  .msg { padding: 8px 12px; border-radius: 10px; max-width: 85%; white-space: pre-wrap; }
+  .user { background: var(--bg); justify-self: end; }
+  .assistant { border: 1px solid var(--line); }
+  .sys { color: var(--muted); font-size: 12px; justify-self: center; text-align: center; }
+  .deleg { font-size: 13px; border-left: 3px solid var(--accent); padding-left: 8px; color: var(--muted); }
+  .meter { height: 6px; width: 120px; background: var(--line); border-radius: 3px; overflow: hidden; }
+  .meter > div { height: 100%; width: 0; background: var(--accent); transition: width 80ms; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Codex Voice</h1>
+  <section class="card">
+    <div class="row">
+      <span id="account" style="flex:1">Verificando login…</span>
+      <button id="login" class="secondary">Entrar com ChatGPT</button>
+      <button id="logout" class="secondary" hidden>Sair</button>
+    </div>
+  </section>
+  <section class="card" id="waCard">
+    <div class="row">
+      <strong style="flex:1">WhatsApp</strong>
+      <button id="waHangup" class="danger" hidden>Desligar chamada do WhatsApp</button>
+    </div>
+    <div id="waStatus" class="sys" style="justify-self:start;text-align:left">Verificando ponte…</div>
+    <img id="waQr" alt="QR do WhatsApp" hidden style="width:260px;height:260px;background:#fff;border-radius:8px;padding:8px">
+    <div id="waRejected" class="row" hidden>
+      <span id="waRejectedText" style="flex:1"></span>
+      <button id="waAllow" class="secondary">Liberar este número</button>
+    </div>
+    <div id="waPolicy" hidden>
+      <div class="listTitle">Quem o bot atende</div>
+      <div class="row">
+        <label class="opt"><input type="radio" name="waMode" value="all"> Todos</label>
+        <label class="opt"><input type="radio" name="waMode" value="all_except"> Todos, exceto bloqueados</label>
+        <label class="opt"><input type="radio" name="waMode" value="only_list"> Só a lista de liberados</label>
+      </div>
+      <div class="lists">
+        <div id="waAllowBox">
+          <div class="listTitle">Liberados</div>
+          <ul id="waAllowList"></ul>
+          <form class="row addForm" data-list="allow"><input placeholder="+55 51 99999-0000" inputmode="tel"><button class="secondary">Adicionar</button></form>
+        </div>
+        <div id="waDenyBox">
+          <div class="listTitle">Bloqueados</div>
+          <ul id="waDenyList"></ul>
+          <form class="row addForm" data-list="deny"><input placeholder="+55 51 99999-0000" inputmode="tel"><button class="secondary">Adicionar</button></form>
+        </div>
+      </div>
+      <div id="waPolicyMsg" class="sys" style="justify-self:start;text-align:left"></div>
+    </div>
+  </section>
+  <section class="card">
+    <div class="row">
+      <label>Voz <select id="voice"></select></label>
+      <span id="status">Desconectado</span>
+    </div>
+    <label>Instruções extras <textarea id="instructions"></textarea></label>
+    <div class="row">
+      <button id="start">Ligar</button>
+      <button id="mute" class="secondary" disabled>Mutar</button>
+      <button id="stop" class="danger" disabled>Desligar</button>
+      <div class="meter" title="Microfone"><div id="level"></div></div>
+    </div>
+  </section>
+  <section class="card">
+    <div id="log"></div>
+    <form id="textForm" class="row">
+      <input id="text" placeholder="Digitar uma mensagem (resposta aparece aqui)" style="flex:1" disabled>
+      <button class="secondary" disabled id="sendText">Enviar</button>
+    </form>
+  </section>
+</main>
+<audio id="remote" autoplay></audio>
+<script>
+const $ = id => document.getElementById(id)
+let pc, mic, events, callId, muted = false, meterTimer
+const partial = { user: null, assistant: null }
+
+function status(text) { $('status').textContent = text }
+function addLine(cls, text) {
+  const div = document.createElement('div')
+  div.className = `msg ${cls}`
+  div.textContent = text
+  $('log').append(div)
+  $('log').scrollTop = $('log').scrollHeight
+  return div
+}
+function setConnected(on) {
+  $('start').disabled = on
+  $('stop').disabled = !on
+  $('mute').disabled = !on
+  $('text').disabled = !on
+  $('sendText').disabled = !on
+  $('voice').disabled = on
+  $('instructions').disabled = on
+}
+
+let waLastQr = null
+async function refreshWhatsApp() {
+  let s
+  try { s = await fetch('/api/wa/status').then(r => r.json()) } catch { s = { reachable: false } }
+  const parts = []
+  if (!s.reachable) parts.push('Ponte do WhatsApp fora do ar (container wa-voice-bridge parado?).')
+  else if (s.connected) parts.push(`Conectado como +${s.me ?? '?'}. Ligue para esse número (1:1 ou em grupo).`)
+  else if (s.qr_available) parts.push('Página só do QR: /qr.html. Escaneie o QR com o WhatsApp do bot: Configurações › Dispositivos conectados › Conectar dispositivo.')
+  else parts.push('Conectando ao WhatsApp…')
+  for (const c of s.calls ?? []) parts.push(`Em chamada com ${c.caller}${c.group ? ' (grupo)' : ''} desde ${new Date(c.startedAt).toLocaleTimeString('pt-BR')}.`)
+  if (s.last_event) parts.push(`Último evento: ${s.last_event}`)
+  $('waStatus').textContent = parts.join(' ')
+  $('waQr').hidden = !(s.reachable && s.qr_available)
+  if (!$('waQr').hidden && waLastQr !== s.qr_id) { $('waQr').src = `/api/wa/qr.svg?t=${Date.now()}`; waLastQr = s.qr_id }
+  $('waRejected').hidden = !s.last_rejected
+  if (s.last_rejected) $('waRejectedText').textContent = `Chamada ignorada de +${s.last_rejected} (fora da regra de atendimento; tocou normal no celular).`
+  renderPolicy(s)
+  $('waHangup').hidden = !(s.calls?.length || s.active_calls?.length)
+  $('waAllow').dataset.number = s.last_rejected ?? ''
+}
+// Call policy: re-rendered only when it changes, so typing in the inputs is not disturbed.
+let policyKey = ''
+function renderPolicy(s) {
+  $('waPolicy').hidden = !s.reachable || !s.policy
+  if (!s.policy) return
+  const key = JSON.stringify([s.policy, s.protected])
+  if (key === policyKey) return
+  policyKey = key
+  const { mode, allow, deny } = s.policy
+  for (const radio of document.querySelectorAll('input[name=waMode]')) radio.checked = radio.value === mode
+  $('waAllowBox').classList.toggle('inactive', mode !== 'only_list')
+  $('waDenyBox').classList.toggle('inactive', mode !== 'all_except')
+  const item = (number, list, locked) => {
+    const li = document.createElement('li')
+    const label = document.createElement('span')
+    label.textContent = `+${number}`
+    li.append(label)
+    if (locked) {
+      const tag = document.createElement('span')
+      tag.className = 'tag'
+      tag.textContent = 'protegido pelo .env (sempre)'
+      li.append(tag)
+    } else {
+      const remove = document.createElement('button')
+      remove.className = 'secondary'
+      remove.textContent = 'Remover'
+      remove.onclick = () => setList(list, number, false)
+      li.append(remove)
+    }
+    return li
+  }
+  $('waAllowList').replaceChildren(...allow.map(n => item(n, 'allow')))
+  $('waDenyList').replaceChildren(...(s.protected ?? []).filter(n => n.length <= 13).map(n => item(n, 'deny', true)), ...deny.map(n => item(n, 'deny')))
+  if (!allow.length) $('waAllowList').innerHTML = '<li><span class="tag">ninguém</span></li>'
+  $('waPolicyMsg').textContent = {
+    all: 'Atende qualquer número. Os protegidos nunca.',
+    all_except: 'Atende qualquer número, menos os bloqueados.',
+    only_list: 'Atende só os liberados. Os outros tocam normal no celular.',
+  }[mode]
+}
+async function postPolicy(path, body) {
+  const res = await fetch(`/api/wa${path}`, { method: 'POST', body: JSON.stringify(body) })
+  if (!res.ok) $('waPolicyMsg').textContent = `Erro: ${await res.text()}`
+  policyKey = ''
+  refreshWhatsApp()
+}
+const setList = (list, number, on) => postPolicy('/allowed', { list, number, on })
+for (const radio of document.querySelectorAll('input[name=waMode]')) radio.onchange = () => postPolicy('/policy/mode', { mode: radio.value })
+for (const form of document.querySelectorAll('.addForm')) {
+  form.onsubmit = ev => {
+    ev.preventDefault()
+    const input = form.querySelector('input')
+    const number = input.value.replace(/\D/g, '')
+    if (!number) return
+    input.value = ''
+    setList(form.dataset.list, number, true)
+  }
+}
+
+refreshWhatsApp()
+setInterval(refreshWhatsApp, 3000)
+$('waAllow').onclick = async () => {
+  await fetch('/api/wa/allowed', { method: 'POST', body: JSON.stringify({ number: $('waAllow').dataset.number }) })
+  refreshWhatsApp()
+}
+$('waHangup').onclick = async () => {
+  await fetch('/api/wa/hangup', { method: 'POST' })
+  refreshWhatsApp()
+}
+
+let loginPoll
+async function refreshAccount() {
+  const a = await fetch('/api/auth').then(r => r.json())
+  if (a.loggedIn) {
+    const origin = a.source === 'app' ? 'login próprio' : 'sessão do Codex'
+    const exp = a.expiresAt ? ` · token até ${new Date(a.expiresAt).toLocaleString('pt-BR')}` : ''
+    $('account').textContent = `${a.email ?? 'conta ChatGPT'} · ${a.plan ?? '?'} · ${origin}${exp}`
+  } else {
+    $('account').textContent = 'Sem login'
+  }
+  if (a.login?.status === 'error') $('account').textContent += ` · login falhou: ${a.login.error}`
+  $('logout').hidden = a.source !== 'app'
+  $('login').textContent = a.source === 'app' ? 'Trocar conta' : 'Entrar com ChatGPT'
+  $('start').disabled = !a.loggedIn || !!pc
+  if (a.login?.status !== 'waiting') clearInterval(loginPoll)
+  return a
+}
+refreshAccount()
+
+$('login').onclick = async () => {
+  const tab = window.open('about:blank', '_blank')
+  const switchAccount = $('login').textContent === 'Trocar conta'
+  const res = await fetch('/api/auth/login', { method: 'POST', body: JSON.stringify({ switchAccount }) })
+  const body = await res.json()
+  if (!res.ok) { tab?.close(); $('account').textContent = `erro: ${body.error}`; return }
+  if (tab) tab.location = body.url
+  else location.href = body.url
+  $('account').textContent = 'Aguardando login no ChatGPT…'
+  clearInterval(loginPoll)
+  loginPoll = setInterval(refreshAccount, 1500)
+}
+$('logout').onclick = async () => {
+  await fetch('/api/auth/logout', { method: 'POST' })
+  refreshAccount()
+}
+
+fetch('/api/config').then(r => r.json()).then(cfg => {
+  for (const v of cfg.voices) $('voice').append(new Option(v, v))
+  $('instructions').value = cfg.defaultInstructions
+})
+
+function startMeter(stream) {
+  const ctx = new AudioContext()
+  const analyser = ctx.createAnalyser()
+  ctx.createMediaStreamSource(stream).connect(analyser)
+  const data = new Uint8Array(analyser.fftSize)
+  meterTimer = setInterval(() => {
+    analyser.getByteTimeDomainData(data)
+    let peak = 0
+    for (const v of data) peak = Math.max(peak, Math.abs(v - 128))
+    $('level').style.width = `${Math.min(100, peak / 0.8)}%`
+  }, 80)
+  return ctx
+}
+
+function handleEvent(e) {
+  switch (e.type) {
+    case 'input_transcript.added':
+      partial.user ??= addLine('user', '')
+      partial.user.textContent += e.item.text
+      break
+    case 'output_transcript.added':
+      partial.assistant ??= addLine('assistant', '')
+      partial.assistant.textContent += e.item.text
+      break
+    case 'turn.done': {
+      const key = e.turn.role
+      if (partial[key]) partial[key].textContent = e.turn.transcript
+      else if (e.turn.transcript) addLine(key, e.turn.transcript)
+      partial[key] = null
+      break
+    }
+    case 'local.delegation':
+      if (e.typed) { if (e.status === 'done') addLine('assistant', e.output) }
+      else if (e.status === 'running') addLine('deleg', `pensando: ${e.input}`)
+      else addLine('deleg', `resposta do backend: ${e.output}`)
+      break
+    case 'local.sideband':
+      status(e.status === 'open' ? 'Conectado' : `Canal de controle fechado (${e.code})`)
+      break
+    case 'session.usage.updated': {
+      const secs = Math.round((e.usage?.audio_duration_ms ?? 0) / 1000)
+      const limit = e.usage_limit?.status ? ` · limite: ${e.usage_limit.status}` : ''
+      status(`Conectado · ${secs}s de áudio${limit}`)
+      break
+    }
+    case 'error':
+    case 'local.error':
+      addLine('sys', `erro: ${e.message ?? e.error?.message ?? JSON.stringify(e.error)}`)
+      break
+    case 'local.closed':
+      addLine('sys', 'chamada encerrada')
+      break
+  }
+}
+
+async function start() {
+  setConnected(true)
+  status('Pedindo microfone…')
+  try {
+    mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
+    pc = new RTCPeerConnection()
+    pc.ontrack = ev => { $('remote').srcObject = ev.streams[0] }
+    pc.onconnectionstatechange = () => { if (['failed', 'disconnected'].includes(pc.connectionState)) status(`WebRTC: ${pc.connectionState}`) }
+    for (const track of mic.getTracks()) pc.addTrack(track, mic)
+    const channel = pc.createDataChannel('oai-events')
+    channel.onmessage = ev => console.debug('datachannel', ev.data)
+    pc.audioCtx = startMeter(mic)
+    const offer = await pc.createOffer()
+    await pc.setLocalDescription(offer)
+    status('Abrindo chamada…')
+    const res = await fetch('/api/call', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sdp: offer.sdp, voice: $('voice').value, instructions: $('instructions').value }),
+    })
+    const body = await res.json()
+    if (!res.ok) throw new Error(body.error)
+    callId = body.callId
+    await pc.setRemoteDescription({ type: 'answer', sdp: body.sdp })
+    status('Conectando canal de controle…')
+    events = new EventSource(`/api/calls/${callId}/events`)
+    events.onmessage = ev => handleEvent(JSON.parse(ev.data))
+  } catch (error) {
+    addLine('sys', `erro: ${error.message}`)
+    await stop()
+  }
+}
+
+async function stop() {
+  if (callId) await fetch(`/api/calls/${callId}/hangup`, { method: 'POST' }).catch(() => {})
+  events?.close()
+  clearInterval(meterTimer)
+  pc?.audioCtx?.close()
+  pc?.close()
+  mic?.getTracks().forEach(t => t.stop())
+  pc = mic = events = callId = null
+  muted = false
+  $('mute').textContent = 'Mutar'
+  $('level').style.width = '0'
+  setConnected(false)
+  status('Desconectado')
+  refreshAccount()
+}
+
+$('start').onclick = start
+$('stop').onclick = stop
+$('mute').onclick = () => {
+  muted = !muted
+  mic?.getAudioTracks().forEach(t => { t.enabled = !muted })
+  $('mute').textContent = muted ? 'Desmutar' : 'Mutar'
+}
+$('textForm').onsubmit = async ev => {
+  ev.preventDefault()
+  const text = $('text').value.trim()
+  if (!text || !callId) return
+  $('text').value = ''
+  addLine('user', text)
+  await fetch(`/api/calls/${callId}/context`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) })
+}
+</script>
+</body>
+</html>

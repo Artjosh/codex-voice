@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QR do bot</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { --bg: #f6f6f4; --fg: #1d1d1b; --muted: #6b6b66; --ok: #0f766e; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #151514; --fg: #ececea; --muted: #9a9a94; --ok: #2dd4bf; } }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; text-align: center; padding: 16px; box-sizing: border-box; }
+  img { width: min(420px, 90vw); height: min(420px, 90vw); background: #fff; padding: 12px; border-radius: 12px; box-sizing: border-box; }
+  #msg { color: var(--muted); max-width: 460px; margin: 16px auto 0; }
+  .ok { color: var(--ok); font-size: 22px; font-weight: 600; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h2>WhatsApp do bot de voz</h2>
+  <img id="qr" alt="QR do WhatsApp" hidden>
+  <div id="msg">Carregando…</div>
+</main>
+<script>
+// Polls the bridge and swaps the QR as soon as WhatsApp rotates it, until the device links.
+let shown = ''
+async function tick() {
+  let s
+  try { s = await fetch('/api/wa/status').then(r => r.json()) } catch { s = { reachable: false } }
+  const img = document.getElementById('qr')
+  const msg = document.getElementById('msg')
+  if (s.connected) {
+    img.hidden = true
+    msg.innerHTML = `<span class="ok">Conectado ✓</span><br>Bot: +${s.me ?? '?'}. Pode fechar esta página.`
+    return
+  }
+  if (!s.reachable) {
+    img.hidden = true
+    msg.textContent = 'Ponte do WhatsApp fora do ar. Tentando de novo…'
+    return
+  }
+  if (s.qr_available) {
+    if (img.hidden || shown !== s.qr_id) {
+      img.src = `/api/wa/qr.svg?t=${Date.now()}`
+      shown = s.qr_id
+    }
+    img.hidden = false
+    msg.textContent = 'No celular do bot: WhatsApp › Configurações › Dispositivos conectados › Conectar dispositivo. O QR se renova sozinho.'
+  } else {
+    img.hidden = true
+    msg.textContent = 'Gerando QR…'
+  }
+}
+tick()
+setInterval(tick, 2000)
+</script>
+</body>
+</html>

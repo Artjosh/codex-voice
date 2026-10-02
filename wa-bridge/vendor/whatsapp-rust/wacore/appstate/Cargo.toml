@@ -1,0 +1,38 @@
+[package]
+name = "wacore-appstate"
+version = "0.7.0"
+edition = "2024"
+rust-version.workspace = true
+authors = ["João Lucas <jlucaso@hotmail.com>"]
+license = "MIT"
+repository = "https://github.com/jlucaso1/whatsapp-rust"
+description = "Appstate for WhatsApp protocol"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+anyhow = { workspace = true }
+buffa = { workspace = true }
+hex = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+serde-big-array = { workspace = true }
+serde_json = { workspace = true, features = ["alloc"] }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+wacore-binary = { workspace = true, default-features = false }
+wacore-libsignal = { workspace = true }
+waproto = { workspace = true }
+
+[dev-dependencies]
+divan = { workspace = true }
+
+[[bench]]
+name = "appstate_benchmark"
+harness = false
+
+[lints]
+workspace = true

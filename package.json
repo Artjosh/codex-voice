@@ -1,0 +1,20 @@
+{
+  "name": "codex-voice",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local voice UI for GPT-Live using a ChatGPT plan through the Codex OAuth client",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test \"test/*.test.mjs\"",
+    "test:live": "node test/live.mjs"
+  },
+  "dependencies": {
+    "opusscript": "^0.1.1",
+    "werift": "^0.24.4",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.12.0"
+  }
+}

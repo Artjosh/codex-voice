@@ -1,0 +1,51 @@
+[package]
+name = "wacore-libsignal"
+version = "0.7.0"
+edition = "2024"
+rust-version.workspace = true
+authors = ["João Lucas <jlucaso@hotmail.com>"]
+license = "MIT"
+repository = "https://github.com/jlucaso1/whatsapp-rust"
+description = "Signal Protocol implementation for the WhatsApp platform"
+
+[features]
+# Typed interop with the decoded libsignal SessionRecord v1 model. Off by
+# default so native consumers carry no migration surface.
+legacy-session-interop = []
+
+[dependencies]
+aes = { workspace = true }
+async-lock = { workspace = true }
+async-trait = { workspace = true }
+buffa = { workspace = true }
+bytes = { workspace = true }
+cbc = { workspace = true }
+chrono = { workspace = true, features = ["now"] }
+ctr = { workspace = true }
+curve25519-dalek = "5.0.0"
+ghash = "0.6.0"
+hex = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+log = { workspace = true }
+portable-atomic = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true, features = ["alloc"] }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+wacore-derive = { workspace = true }
+waproto = { workspace = true }
+x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
+
+[dev-dependencies]
+divan = { workspace = true }
+futures = { workspace = true, features = ["executor"] }
+
+[[bench]]
+name = "libsignal_benchmark"
+harness = false
+
+[lints]
+workspace = true
